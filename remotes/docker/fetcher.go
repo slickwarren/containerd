@@ -51,7 +51,54 @@ func (r dockerFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.R
 	}
 
 	return newHTTPReadSeeker(desc.Size, func(offset int64) (io.ReadCloser, error) {
-		// firstly try fetch via external urls
+		// First use blobs endpoints
+		var firstErr error
+		for _, host := range r.hosts {
+			req := r.request(host, http.MethodGet, "blobs", desc.Digest.String())
+			if err := req.addNamespace(r.refspec.Hostname()); err != nil {
+				return nil, err
+			}
+
+			rc, err := r.open(ctx, req, desc.MediaType, offset)
+			if err != nil {
+				// Store the error for referencing later
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue // try another host
+			}
+
+			return rc, nil
+		}
+
+		// Try manifests endpoints for manifests types
+		switch desc.MediaType {
+		case images.MediaTypeDockerSchema2Manifest, images.MediaTypeDockerSchema2ManifestList,
+			images.MediaTypeDockerSchema1Manifest,
+			ocispec.MediaTypeImageManifest, ocispec.MediaTypeImageIndex:
+
+			for _, host := range r.hosts {
+				req := r.request(host, http.MethodGet, "manifests", desc.Digest.String())
+				if err := req.addNamespace(r.refspec.Hostname()); err != nil {
+					return nil, err
+				}
+
+				rc, err := r.open(ctx, req, desc.MediaType, offset)
+				if err != nil {
+					// Store the error for referencing later
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue // try another host
+				}
+
+				return rc, nil
+			}
+
+			return nil, firstErr
+		}
+
+		// lastly try fetch via optional external urls
 		for _, us := range desc.URLs {
 			u, err := url.Parse(us)
 			if err != nil {
@@ -82,59 +129,14 @@ func (r dockerFetcher) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.R
 
 			rc, err := r.open(ctx, req, desc.MediaType, offset)
 			if err != nil {
-				if errdefs.IsNotFound(err) {
+				if firstErr == nil {
+					firstErr = err
+				}
+				if errdefs.IsNotFound(err) || errdefs.IsUnavailable(err) {
 					continue // try one of the other urls.
 				}
 
 				return nil, err
-			}
-
-			return rc, nil
-		}
-
-		// Try manifests endpoints for manifests types
-		switch desc.MediaType {
-		case images.MediaTypeDockerSchema2Manifest, images.MediaTypeDockerSchema2ManifestList,
-			images.MediaTypeDockerSchema1Manifest,
-			ocispec.MediaTypeImageManifest, ocispec.MediaTypeImageIndex:
-
-			var firstErr error
-			for _, host := range r.hosts {
-				req := r.request(host, http.MethodGet, "manifests", desc.Digest.String())
-				if err := req.addNamespace(r.refspec.Hostname()); err != nil {
-					return nil, err
-				}
-
-				rc, err := r.open(ctx, req, desc.MediaType, offset)
-				if err != nil {
-					// Store the error for referencing later
-					if firstErr == nil {
-						firstErr = err
-					}
-					continue // try another host
-				}
-
-				return rc, nil
-			}
-
-			return nil, firstErr
-		}
-
-		// Finally use blobs endpoints
-		var firstErr error
-		for _, host := range r.hosts {
-			req := r.request(host, http.MethodGet, "blobs", desc.Digest.String())
-			if err := req.addNamespace(r.refspec.Hostname()); err != nil {
-				return nil, err
-			}
-
-			rc, err := r.open(ctx, req, desc.MediaType, offset)
-			if err != nil {
-				// Store the error for referencing later
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue // try another host
 			}
 
 			return rc, nil
